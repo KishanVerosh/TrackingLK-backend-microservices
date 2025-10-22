@@ -23,12 +23,27 @@ function authenticateToken(req, res, next) {
 
   jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
     if (err) return res.status(403).json({ message: "Invalid token" });
-    req.user = user; // contains userID and other info
+    req.user = user;
     next();
   });
 }
 
-// Updated explore route to load posts
+// =======================
+// Multer setup for photo uploads
+// =======================
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, path.join(__dirname, "uploads")),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    const name = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
+    cb(null, name);
+  },
+});
+const upload = multer({ storage, limits: { fileSize: 5 * 1024 * 1024 } });
+
+// =======================
+// Explore routes
+// =======================
 app.get("/explore", authenticateToken, async (req, res) => {
   try {
     const query = `
@@ -48,20 +63,42 @@ app.get("/explore", authenticateToken, async (req, res) => {
       JOIN Photo ON Post.photoID = Photo.photoID
       ORDER BY Post.createdAt DESC
     `;
-    
     const [rows] = await db.query(query);
-// =======================
-// Multer setup for photo uploads
-// =======================
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, path.join(__dirname, "uploads")),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    const name = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
-    cb(null, name);
-  },
+    res.json(rows);
+  } catch (err) {
+    console.error("❌ Explore fetch error:", err);
+    res.status(500).json({ error: err.message });
+  }
 });
-const upload = multer({ storage, limits: { fileSize: 5 * 1024 * 1024 } });
+
+app.get("/explore/:postID", authenticateToken, async (req, res) => {
+  const { postID } = req.params;
+  try {
+    const query = `
+      SELECT 
+        post.postID,
+        post.caption,
+        post.createdAt,
+        place.placeID,
+        place.name AS placeName,
+        place.description AS placeDescription,
+        place.rating AS placeRating,
+        photo.photoID,
+        photo.imageURL,
+        photo.uploadDate
+      FROM post
+      LEFT JOIN place ON post.placeID = place.placeID
+      LEFT JOIN photo ON post.photoID = photo.photoID
+      WHERE post.postID = ?
+    `;
+    const [rows] = await db.query(query, [postID]);
+    if (!rows.length) return res.status(404).json({ message: "Post not found" });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error("❌ Post fetch error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // =======================
 // Profile routes
@@ -70,10 +107,7 @@ app.post("/profile/create", async (req, res) => {
   const { userID, fullName } = req.body;
   if (!userID) return res.status(400).json({ message: "userID is required" });
   try {
-    await db.query(
-      "INSERT INTO profiles (userID, fullName) VALUES (?, ?)",
-      [userID, fullName || null]
-    );
+    await db.query("INSERT INTO profiles (userID, fullName) VALUES (?, ?)", [userID, fullName || null]);
     res.json({ message: "Profile created successfully" });
   } catch (err) {
     console.error("❌ Profile creation error:", err);
@@ -110,7 +144,6 @@ app.put("/profile/me", authenticateToken, async (req, res) => {
     values.push(userID);
     const sql = `UPDATE profiles SET ${updates.join(", ")} WHERE userID = ?`;
     await db.query(sql, values);
-
     res.json({ message: "Profile updated successfully" });
   } catch (err) {
     console.error("❌ Profile update error:", err);
@@ -121,8 +154,7 @@ app.put("/profile/me", authenticateToken, async (req, res) => {
 app.post("/profile/me/photo", authenticateToken, upload.single("photo"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: "No file uploaded" });
-    const filename = req.file.filename;
-    const fileUrl = `/uploads/${filename}`;
+    const fileUrl = `/uploads/${req.file.filename}`;
     const userID = req.user.userID;
     await db.query("UPDATE profiles SET photo = ? WHERE userID = ?", [fileUrl, userID]);
     res.json({ message: "Photo uploaded successfully", photo: fileUrl });
@@ -133,57 +165,23 @@ app.post("/profile/me/photo", authenticateToken, upload.single("photo"), async (
 });
 
 // =======================
-// Community routes (posts, comments, likes)
+// Community routes
 // =======================
-
-// Get all posts with poster info
 app.get("/community/posts", authenticateToken, async (req, res) => {
   try {
-    const [rows] = await db.query(
-      `SELECT p.postID, p.content, p.image, p.createdAt, 
-              pr.fullName, pr.photo as profilePhoto
-       FROM posts p
-       JOIN profiles pr ON p.profileID = pr.profileID
-       ORDER BY p.createdAt DESC`
-    );
+    const [rows] = await db.query(`
+      SELECT p.postID, p.content, p.image, p.createdAt, 
+             pr.fullName, pr.photo as profilePhoto
+      FROM posts p
+      JOIN profiles pr ON p.profileID = pr.profileID
+      ORDER BY p.createdAt DESC
+    `);
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-
-// Get a single post with full details
-app.get("/explore/:postID", authenticateToken, async (req, res) => {
-  const { postID } = req.params;
-
-  try {
-    const query = `
-      SELECT 
-        post.postID,
-        post.caption,
-        post.createdAt,
-        place.placeID,
-        place.name AS placeName,
-        place.description AS placeDescription,
-        place.rating AS placeRating,
-        photo.photoID,
-        photo.imageURL,
-        photo.uploadDate
-      FROM post
-      LEFT JOIN place ON post.placeID = place.placeID
-      LEFT JOIN photo ON post.photoID = photo.photoID
-      WHERE post.postID = ?
-    `;
-
-    const [rows] = await db.query(query, [postID]);
-    if (rows.length === 0) {
-      return res.status(404).json({ message: "Post not found" });
-    }
-    res.json(rows[0]);
-  } catch (err) {
-    console.error("Error fetching post:", err);
-// Create a post
 app.post("/community/posts", authenticateToken, upload.single("image"), async (req, res) => {
   try {
     const userID = req.user.userID;
@@ -205,7 +203,6 @@ app.post("/community/posts", authenticateToken, upload.single("image"), async (r
   }
 });
 
-// Add comment to a post
 app.post("/community/posts/:postID/comments", authenticateToken, async (req, res) => {
   try {
     const userID = req.user.userID;
@@ -216,10 +213,7 @@ app.post("/community/posts/:postID/comments", authenticateToken, async (req, res
     const { comment } = req.body;
     const postID = req.params.postID;
 
-    await db.query(
-      "INSERT INTO comments (postID, profileID, comment) VALUES (?, ?, ?)",
-      [postID, profileID, comment]
-    );
+    await db.query("INSERT INTO comments (postID, profileID, comment) VALUES (?, ?, ?)", [postID, profileID, comment]);
     res.json({ message: "Comment added" });
   } catch (err) {
     console.error("❌ Comment error:", err);
@@ -227,7 +221,6 @@ app.post("/community/posts/:postID/comments", authenticateToken, async (req, res
   }
 });
 
-// Like/unlike a post
 app.post("/community/posts/:postID/like", authenticateToken, async (req, res) => {
   try {
     const userID = req.user.userID;
@@ -237,20 +230,14 @@ app.post("/community/posts/:postID/like", authenticateToken, async (req, res) =>
     const profileID = profile[0].profileID;
     const postID = req.params.postID;
 
-    // check if already liked
-    const [existing] = await db.query(
-      "SELECT * FROM likes WHERE postID = ? AND profileID = ?",
-      [postID, profileID]
-    );
+    const [existing] = await db.query("SELECT * FROM likes WHERE postID = ? AND profileID = ?", [postID, profileID]);
 
     if (existing.length) {
-      // unlike
       await db.query("DELETE FROM likes WHERE postID = ? AND profileID = ?", [postID, profileID]);
-      return res.json({ message: "Post unliked" });
+      res.json({ message: "Post unliked" });
     } else {
-      // like
       await db.query("INSERT INTO likes (postID, profileID) VALUES (?, ?)", [postID, profileID]);
-      return res.json({ message: "Post liked" });
+      res.json({ message: "Post liked" });
     }
   } catch (err) {
     console.error("❌ Like error:", err);
