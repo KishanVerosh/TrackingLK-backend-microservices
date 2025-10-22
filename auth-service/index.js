@@ -10,6 +10,7 @@ app.use(express.json());
 app.use(cors());
 
 // ✅ Register
+// ✅ Register
 app.post("/register", async (req, res) => {
   const { userName, email, password, phoneNumber } = req.body;
 
@@ -18,22 +19,43 @@ app.post("/register", async (req, res) => {
   }
 
   try {
+    // 1️⃣ Check if email already exists
     const [existing] = await db.query("SELECT * FROM users WHERE email = ?", [email]);
     if (existing.length)
       return res.status(400).json({ message: "User with this email already exists" });
 
+    // 2️⃣ Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
-    await db.query(
+
+    // 3️⃣ Insert into Auth DB
+    const [result] = await db.query(
       "INSERT INTO users (userName, email, password, phoneNumber, activeStatus) VALUES (?, ?, ?, ?, ?)",
       [userName, email, hashedPassword, phoneNumber || null, true]
     );
 
-    res.json({ message: "User registered successfully" });
+    const newUserID = result.insertId; // ✅ newly created user's ID
+
+    // 4️⃣ Create blank profile in App DB (call app server)
+    const axios = require("axios");
+
+    try {
+      await axios.post("http://localhost:5000/profile/create", {
+        userID: newUserID,
+        fullName: userName,
+      });
+    } catch (profileErr) {
+      console.error("⚠️ Could not create profile:", profileErr.message);
+      // don't fail registration even if profile creation fails
+    }
+
+    // 5️⃣ Respond success
+    res.json({ message: "User registered successfully", userID: newUserID });
   } catch (err) {
-    console.error(err);
+    console.error("❌ Registration error:", err);
     res.status(500).json({ error: err.message });
   }
 });
+
 
 // ✅ Login
 app.post("/login", async (req, res) => {
