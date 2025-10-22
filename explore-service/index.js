@@ -20,14 +20,71 @@ function authenticateToken(req, res, next) {
   });
 }
 
-// Example explore route
+// Updated explore route to load posts
 app.get("/explore", authenticateToken, async (req, res) => {
   try {
-    const [rows] = await db.query("SELECT * FROM explore_items");
+    const query = `
+      SELECT 
+        Post.postID,
+        Post.caption,
+        Post.createdAt,
+        Place.placeID,
+        Place.name AS placeName,
+        Place.description AS placeDescription,
+        Place.rating AS placeRating,
+        Photo.photoID,
+        Photo.imageURL,
+        Photo.uploadDate
+      FROM Post
+      JOIN Place ON Post.placeID = Place.placeID
+      JOIN Photo ON Post.photoID = Photo.photoID
+      ORDER BY Post.createdAt DESC
+    `;
+    
+    const [rows] = await db.query(query);
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
+
+
+// Get a single post with full details
+app.get("/explore/:postID", authenticateToken, async (req, res) => {
+  const { postID } = req.params;
+
+  try {
+    const query = `
+      SELECT 
+        post.postID,
+        post.caption,
+        post.createdAt,
+        place.placeID,
+        place.name AS placeName,
+        place.description AS placeDescription,
+        place.rating AS placeRating,
+        photo.photoID,
+        photo.imageURL,
+        photo.uploadDate
+      FROM post
+      LEFT JOIN place ON post.placeID = place.placeID
+      LEFT JOIN photo ON post.photoID = photo.photoID
+      WHERE post.postID = ?
+    `;
+
+    const [rows] = await db.query(query, [postID]);
+    if (rows.length === 0) {
+      return res.status(404).json({ message: "Post not found" });
+    }
+    res.json(rows[0]);
+  } catch (err) {
+    console.error("Error fetching post:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+
 
 app.listen(process.env.PORT, () => console.log(`Explore service running on port ${process.env.PORT}`));
