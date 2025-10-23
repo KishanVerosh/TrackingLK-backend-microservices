@@ -169,15 +169,55 @@ app.post("/profile/me/photo", authenticateToken, upload.single("photo"), async (
 // =======================
 app.get("/community/posts", authenticateToken, async (req, res) => {
   try {
-    const [rows] = await db.query(`
-      SELECT p.postID, p.content, p.image, p.createdAt, 
-             pr.fullName, pr.photo as profilePhoto
+    // Get profileID for the caller
+    const userID = req.user.userID;
+    const [profileRows] = await db.query("SELECT profileID FROM profiles WHERE userID = ?", [userID]);
+    const profileID = profileRows.length ? profileRows[0].profileID : null;
+
+    const [rows] = await db.query(
+      `
+      SELECT 
+        p.postID,
+        p.profileID,
+        p.content,
+        p.image,
+        p.createdAt,
+        pr.fullName,
+        pr.photo AS profilePhoto,
+        (SELECT COUNT(*) FROM likes l WHERE l.postID = p.postID) AS likeCount,
+        (SELECT COUNT(*) FROM comments c WHERE c.postID = p.postID) AS commentCount,
+        (SELECT COUNT(*) FROM likes l2 WHERE l2.postID = p.postID AND l2.profileID = ?) AS likedByMe
       FROM posts p
       JOIN profiles pr ON p.profileID = pr.profileID
       ORDER BY p.createdAt DESC
-    `);
+      `,
+      [profileID] // used in the likedByMe subquery
+    );
+
+    // likedByMe comes as number (0 or 1) — convert to boolean
+    const mapped = rows.map(r => ({ ...r, likedByMe: Boolean(r.likedByMe) }));
+
+    res.json(mapped);
+  } catch (err) {
+    console.error("❌ Error fetching posts:", err);
+    res.status(500).json({ error: "Failed to fetch posts" });
+  }
+});
+
+app.get("/community/posts/:postID/comments", authenticateToken, async (req, res) => {
+  try {
+    const postID = req.params.postID;
+    const [rows] = await db.query(
+      `SELECT c.commentID, c.comment, c.createdAt, pr.profileID, pr.fullName, pr.photo AS profilePhoto
+       FROM comments c
+       JOIN profiles pr ON c.profileID = pr.profileID
+       WHERE c.postID = ?
+       ORDER BY c.createdAt ASC`,
+      [postID]
+    );
     res.json(rows);
   } catch (err) {
+    console.error("❌ Comments fetch error:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -205,42 +245,130 @@ app.post("/community/posts", authenticateToken, upload.single("image"), async (r
 
 app.post("/community/posts/:postID/comments", authenticateToken, async (req, res) => {
   try {
+    const postID = req.params.postID;
     const userID = req.user.userID;
     const [profile] = await db.query("SELECT profileID FROM profiles WHERE userID = ?", [userID]);
     if (!profile.length) return res.status(404).json({ message: "Profile not found" });
-
     const profileID = profile[0].profileID;
     const { comment } = req.body;
-    const postID = req.params.postID;
+    if (!comment || !comment.trim()) return res.status(400).json({ message: "Comment cannot be empty" });
 
-    await db.query("INSERT INTO comments (postID, profileID, comment) VALUES (?, ?, ?)", [postID, profileID, comment]);
-    res.json({ message: "Comment added" });
+    const [result] = await db.query("INSERT INTO comments (postID, profileID, comment) VALUES (?, ?, ?)", [postID, profileID, comment.trim()]);
+    res.json({ message: "Comment added", commentID: result.insertId });
   } catch (err) {
-    console.error("❌ Comment error:", err);
+    console.error("❌ Comment add error:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
 app.post("/community/posts/:postID/like", authenticateToken, async (req, res) => {
   try {
+    const postID = req.params.postID;
     const userID = req.user.userID;
     const [profile] = await db.query("SELECT profileID FROM profiles WHERE userID = ?", [userID]);
     if (!profile.length) return res.status(404).json({ message: "Profile not found" });
-
     const profileID = profile[0].profileID;
-    const postID = req.params.postID;
 
     const [existing] = await db.query("SELECT * FROM likes WHERE postID = ? AND profileID = ?", [postID, profileID]);
-
     if (existing.length) {
       await db.query("DELETE FROM likes WHERE postID = ? AND profileID = ?", [postID, profileID]);
-      res.json({ message: "Post unliked" });
+      return res.json({ message: "Unliked" });
     } else {
       await db.query("INSERT INTO likes (postID, profileID) VALUES (?, ?)", [postID, profileID]);
-      res.json({ message: "Post liked" });
+      return res.json({ message: "Liked" });
     }
   } catch (err) {
     console.error("❌ Like error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/profile/:id", authenticateToken, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const [rows] = await db.query(
+      "SELECT profileID, userID, fullName,fullName AS username, photo FROM profiles WHERE profileID = ? OR userID = ? LIMIT 1",
+      [id, id]
+    );
+    if (!rows.length) return res.status(404).json({ message: "Profile not found" });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error("❌ Profile fetch error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put("/community/posts/:postID", authenticateToken, async (req, res) => {
+  try {
+    const postID = req.params.postID;
+    const userID = req.user.userID;
+
+    // get profileID for caller
+    const [profiles] = await db.query("SELECT profileID FROM profiles WHERE userID = ?", [userID]);
+    if (!profiles.length) return res.status(404).json({ message: "Profile not found" });
+    const profileID = profiles[0].profileID;
+
+    // get post owner
+    const [posts] = await db.query("SELECT profileID FROM posts WHERE postID = ?", [postID]);
+    if (!posts.length) return res.status(404).json({ message: "Post not found" });
+
+    if (String(posts[0].profileID) !== String(profileID)) {
+      return res.status(403).json({ message: "Not authorized to edit this post" });
+    }
+
+    const { content } = req.body;
+    if (content === undefined) return res.status(400).json({ message: "No content provided" });
+
+    await db.query("UPDATE posts SET content = ? WHERE postID = ?", [content, postID]);
+    res.json({ message: "Post updated successfully" });
+  } catch (err) {
+    console.error("❌ Post update error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/community/posts/:postID", authenticateToken, async (req, res) => {
+  try {
+    const postID = req.params.postID;
+    const userID = req.user.userID;
+
+    // get profileID for caller
+    const [profiles] = await db.query("SELECT profileID FROM profiles WHERE userID = ?", [userID]);
+    if (!profiles.length) return res.status(404).json({ message: "Profile not found" });
+    const profileID = profiles[0].profileID;
+
+    // get post owner
+    const [posts] = await db.query("SELECT profileID, image FROM posts WHERE postID = ?", [postID]);
+    if (!posts.length) return res.status(404).json({ message: "Post not found" });
+
+    if (String(posts[0].profileID) !== String(profileID)) {
+      return res.status(403).json({ message: "Not authorized to delete this post" });
+    }
+
+    // optional: remove related rows (comments, likes)
+    await db.query("DELETE FROM comments WHERE postID = ?", [postID]);
+    await db.query("DELETE FROM likes WHERE postID = ?", [postID]);
+
+    // delete post
+    await db.query("DELETE FROM posts WHERE postID = ?", [postID]);
+
+    // optional: delete image file from uploads (if stored locally)
+    /*
+    try {
+      const imagePath = posts[0].image;
+      if (imagePath) {
+        const fs = require("fs");
+        const imgFile = path.join(__dirname, imagePath.replace(/^\//, ""));
+        if (fs.existsSync(imgFile)) fs.unlinkSync(imgFile);
+      }
+    } catch (fsErr) {
+      console.warn("Failed to remove post image file:", fsErr);
+    }
+    */
+
+    res.json({ message: "Post deleted successfully" });
+  } catch (err) {
+    console.error("❌ Post delete error:", err);
     res.status(500).json({ error: err.message });
   }
 });
